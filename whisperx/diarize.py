@@ -39,37 +39,60 @@ class DiarizationPipeline:
 
         return diarize_df, speaker_embeddings
 
+
+def assign_speaker(diarize_df, start, end, fill_nearest=False):
+    intersections = np.minimum(diarize_df['end'], end) - np.maximum(diarize_df['start'], start)
+    valid_segments = diarize_df if fill_nearest else diarize_df[intersections > 0]
+
+    if not valid_segments.empty:
+        return valid_segments.loc[intersections[valid_segments.index].idxmax(), 'speaker']
+    return None
+
+
 def assign_word_speakers(diarize_df, transcript_result, speaker_embeddings=None, fill_nearest=False):
-    transcript_segments = transcript_result["segments"]
-    for seg in transcript_segments:
-        # assign speaker to segment (if any)
-        diarize_df['intersection'] = np.minimum(diarize_df['end'], seg['end']) - np.maximum(diarize_df['start'], seg['start'])
-        diarize_df['union'] = np.maximum(diarize_df['end'], seg['end']) - np.minimum(diarize_df['start'], seg['start'])
-        # remove no hit, otherwise we look for closest (even negative intersection...)
-        if not fill_nearest:
-            dia_tmp = diarize_df[diarize_df['intersection'] > 0]
+    new_segments = []
+
+    for seg in transcript_result["segments"]:
+        if 'words' not in seg or not seg['words']:
+            speaker = assign_speaker(diarize_df, seg['start'], seg['end'], fill_nearest)
+            new_segments.append({**seg, "speaker": speaker})
         else:
-            dia_tmp = diarize_df
-        if len(dia_tmp) > 0:
-            # sum over speakers
-            speaker = dia_tmp.groupby("speaker")["intersection"].sum().sort_values(ascending=False).index[0]
-            seg["speaker"] = speaker
-        
-        # assign speaker to words
-        if 'words' in seg:
+            current_segment = {
+                "start": seg["start"],
+                "end": None,
+                "text": "",
+                "words": [],
+                "speaker": None
+            }
+
             for word in seg['words']:
-                if 'start' in word:
-                    diarize_df['intersection'] = np.minimum(diarize_df['end'], word['end']) - np.maximum(diarize_df['start'], word['start'])
-                    diarize_df['union'] = np.maximum(diarize_df['end'], word['end']) - np.minimum(diarize_df['start'], word['start'])
-                    # remove no hit
-                    if not fill_nearest:
-                        dia_tmp = diarize_df[diarize_df['intersection'] > 0]
-                    else:
-                        dia_tmp = diarize_df
-                    if len(dia_tmp) > 0:
-                        # sum over speakers
-                        speaker = dia_tmp.groupby("speaker")["intersection"].sum().sort_values(ascending=False).index[0]
-                        word["speaker"] = speaker
+                word_start = word.get('start', seg['start'])
+                word_end = word.get('end', seg['end'])
+                speaker = assign_speaker(diarize_df, word_start, word_end, fill_nearest)
+                word["speaker"] = speaker
+
+                if current_segment["speaker"] != speaker:
+                    if current_segment["words"]:
+                        current_segment["end"] = word_start
+                        current_segment["text"] = " ".join(w["word"] for w in current_segment["words"])
+                        new_segments.append(current_segment)
+
+                    current_segment = {
+                        "start": word_start,
+                        "end": None,
+                        "text": "",
+                        "words": [],
+                        "speaker": speaker
+                    }
+
+                current_segment["words"].append(word)
+
+            if current_segment["words"]:
+                current_segment["end"] = seg["end"]
+                current_segment["text"] = " ".join(w["word"] for w in current_segment["words"])
+                new_segments.append(current_segment)
+
+    transcript_result["segments"] = new_segments
 
     if speaker_embeddings is not None:
         transcript_result["speaker_embeddings"] = speaker_embeddings
